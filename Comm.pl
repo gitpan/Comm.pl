@@ -38,10 +38,10 @@ Function summary:
 				# internal symbols, and exports functions to
 				# caller's package.
 
-    &Comm'init(1.7);		# If first arg is numeric, it specifies a 
+    &Comm'init(1.8);		# If first arg is numeric, it specifies a 
 				# desired version for compatibility.
 
-    &Comm'init(1.7, "func",...);# Tell it to export specified function(s),
+    &Comm'init(1.8, "func",...);# Tell it to export specified function(s),
 				# otherwise, init() will export all documented
 				# functions.
 
@@ -340,6 +340,7 @@ History:
 11/26/96 11:26:55 AM;  eric:	added name export to open_duphandl*
 07/02/97 11:54:46 AM;  eric:	revamped "wait"ing
 08/06/97 10:23:01 AM;  eric:	rev'd to 1.7
+08/20/97 14:08:34 AM;  eric:	v1.8:  nasty little bug with wait_nohang.
 EOF
 
 
@@ -360,7 +361,7 @@ sub init{
   local( @args) = @_;
 
 
-  $Version = 1.7;
+  $Version = 1.8;
   if ( $version )
   {
     if ( $Version ne $version )
@@ -1202,7 +1203,7 @@ sub getpty { ## private
   $_PTY =~ s/^([^']+)$/(caller)[$[]."'".$1/e;
   $_TTY =~ s/^([^']+)$/(caller)[$[]."'".$1/e;
 
-  if ( -e "/dev/ptmx" || -e "/dev/ptc" )
+  if ( $OS_name ne "OSF1" && -e "/dev/ptmx" || -e "/dev/ptc" )
   {
     return &getpty_svr4($_PTY,$_TTY);
   }
@@ -1891,6 +1892,10 @@ sub wait_it{
     # cause a blocking/hanging "wait".
   }
  
+
+  $ret = 0 if $ret < 0;
+
+  #print STDERR "wait_nohang returning $ret\n" if $Debug;
   return $ret;
 }
 
@@ -2577,7 +2582,7 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.7 );
+&Comm'init( 1.8 );
 
 $Host = "somehost";
 $User = "someuser";
@@ -2627,7 +2632,7 @@ if 0;
 
 require "Comm.pl";
 
-&Comm'init( 1.7 );
+&Comm'init( 1.8 );
 
 $Program = "telnet";
 #$Program = "/usr/ucb/rlogin -l qwerty";   # try this to test login recovery
@@ -2714,7 +2719,7 @@ print $Proc_pty_handle "\n";		# give us another shell prompt, please
 LOOP: {
   ( $match, $err ) = &interact(
 	"\003", "\0331",  # don't use '\003' or string match will see "\ 0 0 3"
-	  $Proc_pty_handle, ".*199\d",
+	  $Proc_pty_handle, '.*199\d',
 	);
 
   if ( $err )
@@ -2788,7 +2793,7 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.7 );
+&Comm'init( 1.8 );
 #$Debug=1;
 $|=1;
 
@@ -2819,7 +2824,7 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.7 );
+&Comm'init( 1.8 );
 use IPC::Open3;
 
 $|=1;
