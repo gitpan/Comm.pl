@@ -1,0 +1,166 @@
+Path: eric
+From: eric.arnold@sun.com (Eric Arnold)
+Newsgroups: comp.lang.perl.misc
+Subject: ANNOUNCE:  Comm.pl, a new expect/chat2.pl pkg, Beta1
+Message-ID: <ERIC.95Oct08185109@animus.sun.com>
+Date: 8 Oct 95 18:51:09 GMT
+Sender: news@sun.com
+Distribution: 
+Organization: Sun Microsystems
+X-Newsreader: prn Ver 1.09
+--------
+
+Hello, all.  Recently, Tom made the deeply disturbing heretical statement:
+
+  > You should probably just give up on perl for expect stuff.  
+  > 
+  > Anyone caring to dispute this suggestion is welcome to provide an
+  > expect-like module in perl5.  I mean a real one, fully portable, 
+  > delightfully elegant and easy to use.
+  > 
+  > Failing that, use tcl -- and suffer.
+  > 
+  > --tom
+  > -- 
+  > Tom Christiansen      Perl Consultant, Gamer, Hiker   tchrist@mox.perl.com
+
+So, "caring to dispute this", since I just know Perl can be used simply and
+easily to do expect-like stuff, with the much better Perl language support,
+I'm providing the package I've been keeping up to date over the last
+couple years, with modifications to address:
+
+  "a real one"
+  "fully portable"
+  "delightfully elegant and easy to use"
+
+The, "module in perl5", bit is open to discussion, as is all of it.  Comments
+and suggestions are welcome.
+
+-Eric
+
+
+
+
+What:
+
+  "Comm.pl", a successor to "chat2.pl", providing a high level interface to:
+
+    - STREAM/UDP sockets
+    - pseudo-tty control
+    - Revamped "expect"-like functionality (plus "interact").
+    - ioctl/stty terminal mode control
+
+  other things:
+
+    - Support for BSD & SVR4 flavors (so far, tested with SunOS4.x, Solaris2.x)
+    - sample client/server and expect scripts
+
+
+Why:
+
+  - "chat2.pl" doesn't have SVR4 support.  People have been posted a
+    lot with questions about getting SOCK_STREAM right, or how to get
+    a pty.
+
+  - The Expect pattern/action pair only confuses people the way that chat2
+    emulated it.  A Perl "expect" should be simple; it should not be
+    trying to execute code given as parameters; that's what the Perl
+    interpreter is for.  Also, the TCL Expect program has a whole lot
+    of stuff that we don't really need because it's available via other
+    methods in Perl (i.e. "send_tty").
+
+
+
+Issues:
+
+  ----------------------------------------
+  What should "expect" look like?
+  ----------------------------------------
+
+    - All a Perl expect function really needs to do is to look through
+      input (non-blocking, without need for newlines) and return
+      whether a pattern was found or not.
+
+      I've changed the interface to:
+
+	( $match, $err, $before, $after ) = 
+		  &expect( $fh, $timeout, 'regexp1', 'regexp2' );
+
+	die "expect failed, err($err), last seen($before)" if $err;
+
+	$_ = $match ; SWITCH : 
+	{
+	  /regexp1/ && do { print $fh "something\n" ; next SWITCH };
+	  /regexp2/ && do { print $fh "other\n" ; next SWITCH };
+	  # default
+	}
+	# or if .. else; whatever you want.
+
+      or for more simple situations:
+
+	&expect( $fh, $timeout, 'regexp1' ) || die "regexp1 failed, err=$!";
+	print $fh "something\n";
+	&expect( $fh, $timeout, 'regexp2' ) || die "regexp2 failed, err=$!";
+	print $fh "something else\n";
+
+
+    - When something doesn't work right, people are often confused as to
+      what is going wrong.  That's why I added the "$before" and
+      "$after" variables, so people can [be encouraged to] see what's
+      being read or discarded, and why their pattern isn't matching.
+
+    - The "interact()" interface is:
+
+	( $match, $err ) = &interact( "optional string patterns for STDIN",..., 
+			$Proc_pty_handle, "optional regex patterns", ... );
+
+      I don't know how offensive it is to have $Proc_pty_handle be the
+      delimeter between the string patterns and the regex patterns.  I
+      wanted to provide triggers for both the user (STDIN) and the process
+      ($Proc_pty_handle), and that seemed expedient.
+    
+    - Nit:  I wanted to be able to set $! from within "expect()" so
+      that when the user used the short (!wantarray) form, I could
+      still give error feedback.  I found that $! can only be set to
+      valid values for "errno".  Then I found that I couldn't set and
+      make it stick until the results had been evaluated by the
+      caller.  Rats.
+
+  ----------------------------------------
+  Should it be a Perl5 module?  
+  Does it need to be object oriented?  
+  Abandon Perl4 support?
+  ----------------------------------------
+
+    I can't decide whether to abandon Perl4, yet.  Nothing about
+    Comm.pl, as it is, really screams for Perl5 functionality, though
+    it would be convenient to use "Exporter.pm", "Socket.pm", and array
+    refs for "interact()".  I have a real bias toward Perl5, but I don't
+    know whether the world shares it.  Speak up if you're using Perl4,
+    and you can't upgrade for some reason.
+
+  ----------------------------------------
+  Portability?
+  ----------------------------------------
+
+    Pseudo-tty portability is a problem:  one version uses [some] BSD
+    backward compatibility in Solaris, and the other version uses some
+    scarey bit hacking, which might not be any more portable:
+
+      # ptsname - not portable probably: assumes 14 bit minor numbers.
+      # only a problem if it's less than 14bits, I think.
+      print "rdev=$rdev\n";
+      $rdev &= (1<<14) - 1;
+      $slave = "/dev/pts/$rdev";
+
+    The main problem being that Perl has no interface to ptm functions
+    like "grantpt" and "ptsname".  Making a C linkable module seems
+    like overkill.  Is there a POSIX standard for this, which could place
+    it in the POSIX module?
+
+    Perl5 does have a good socket module, which should be used, I guess,
+    but it doesn't have Streams stuff like "I_PUSH", etc.  So, system
+    dependencies will still have to live in the Comm.pl package.  
+
+    This then gets back to the question of whether to write it as Perl5-only,
+    or retain the current Perl4/Perl5 compatibility.
