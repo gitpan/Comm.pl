@@ -2,8 +2,8 @@ Path: eric
 From: eric.arnold@sun.com (Eric Arnold)
 Newsgroups: comp.lang.perl.misc
 Subject: ANNOUNCE:  Comm.pl, a new expect/chat2.pl pkg, Beta1
-Message-ID: <ERIC.95Oct08185109@animus.sun.com>
-Date: 8 Oct 95 18:51:09 GMT
+Message-ID: <ERIC.95Oct07230321@m-e-ir1.sun.com>
+Date: 7 Oct 95 23:03:21 GMT
 Sender: news@sun.com
 Distribution: 
 Organization: Sun Microsystems
@@ -85,14 +85,12 @@ Issues:
 
 	( $match, $err, $before, $after ) = 
 		  &expect( $fh, $timeout, 'regexp1', 'regexp2' );
-
-	die "expect failed, err($err), last seen($before)" if $err;
-
 	$_ = $match ; SWITCH : 
 	{
 	  /regexp1/ && do { print $fh "something\n" ; next SWITCH };
 	  /regexp2/ && do { print $fh "other\n" ; next SWITCH };
 	  # default
+	  die "expect failed, err($err), last seen($before)" if $err;
 	}
 	# or if .. else; whatever you want.
 
@@ -108,6 +106,37 @@ Issues:
       what is going wrong.  That's why I added the "$before" and
       "$after" variables, so people can [be encouraged to] see what's
       being read or discarded, and why their pattern isn't matching.
+
+
+    - I didn't go with the anon-sub idea,
+	expect (
+	      'regexp1' => sub { print $fh "something1" },
+	      'regexp2' => sub { print $fh "something2" },
+	      ...
+	 );
+      because,
+      1) In most circumstances, people probably will only be using a single
+	 pattern (I could be wrong about this).
+      2) The procedural flow in such a thing can quickly become inside out,
+	 especially if the desired "action" is to retry the current
+	 "expect()".
+      3) Often because of 2), with the old "chat2'expect()", people would
+	 just use the idiom,
+	   $match = &chat'expect($fh, $timeout, 'regexp', '"$&"' );
+	 which is the equivalent of the "Comm'expect()" behavior, but much
+	 more obfuscated!  I'm trying to make it simple so people will quit
+	 posting scads of questions saying "how do I use expect()", like they
+	 have in the past.
+      4) In the TCL/Expect language, the "expect()" function call is really a
+	 combination of function call, and switch/case statement.  If Perl
+	 had a decent switch construct, we probably wouldn't be having this
+	 discussion.  (Yes, the regexps get evaluated twice, but "expect()"
+	 is not for super-high-volume applications, anyway.)
+      5) I might add anon subs sometime, but that's opening the door to
+	 other nasties, like "what should be argument list to the anon sub?",
+	 "I want to pass in my own parameters", "how do I branch out of the
+	 sub?", etc.
+
 
     - The "interact()" interface is:
 

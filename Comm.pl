@@ -6,6 +6,7 @@ This is a free library of IPC goodies.  There is no warrenty, but I'd
 be happy to get ideas for improvements.  - Eric.Arnold@Sun.com.
 
 It's been tested with Perl4/Perl5 and SunOS4.x and Solaris2.3 - 2.5.
+Work is being done on AIX3.2.5, IRIX5.3, HP-UX(9), Linux
 
 A lot was borrowed from "chat2.pl"(Randal L. Schwartz), and then
 diverged as its goals became generalized client/server IPC, support for
@@ -37,10 +38,10 @@ Function summary:
 				# internal symbols, and exports functions to
 				# caller's package.
 
-    &Comm'init(1.3);		# If first arg is numeric, it specifies a 
+    &Comm'init(1.5);		# If first arg is numeric, it specifies a 
 				# desired version for compatibility.
 
-    &Comm'init(1.3, "func",...);# Tell it to export specified function(s),
+    &Comm'init(1.5, "func",...);# Tell it to export specified function(s),
 				# otherwise, init() will export all documented
 				# functions.
 
@@ -106,10 +107,10 @@ Function summary:
 
     # "$err" can contain "TIMEOUT" or "EOF".  
 
+    # "$before" and "$after" are intended to help you debug your process.
     # "$before" will contain anything before "$match", or everything
-    # accumulated if "$err" is set.
-    
-    # "$after" contains everything after "$match".
+    # accumulated if "$err" is set.  "$after" contains everything after
+    # "$match" (assuming the pattern succeeds).
 
     # Each file handle has an associated internal accumulator containing
     # any data read but not discarded:
@@ -158,7 +159,7 @@ Function summary:
 
     # You must set terminal modes for programs which don't handle that 
     # themselves (like "telnet"):
-    &stty_sane($Proc_tty_handle);
+    &stty_sane($Proc_tty_handle);	# use $Proc_pty_handle for HP
     &stty_raw(STDIN);
     ( $match, $err ) = &interact( "optional string patterns for STDIN", ..., 
 			$Proc_pty_handle, "optional regex patterns", ... );
@@ -231,7 +232,7 @@ Function summary:
     &close_noshutdown( $handle );
 
 
-  stty_sane , stty_raw, stty_ioctl :
+  stty_sane, stty_raw, stty_ioctl :
   --------------------------------
     
     # These use "stty" to set the terminal modes the first time through,
@@ -239,6 +240,7 @@ Function summary:
     # containing the modes is then cached for subsequent calls to
     # "ioctl()", which is much faster for switching between modes, but is
     # a pain to make portable.  "$Proc_tty_handle" can be "STDIN".
+    # Use $Proc_pty_handle for HP.
 
     &stty_sane( $Proc_tty_handle );
     &stty_raw( $Proc_tty_handle );
@@ -274,6 +276,12 @@ Portability bug-a-boos:
     right SVR4 thing, although without direct access to the right function
     calls :-(.  getpty() also works for SVR4/Solaris, using some partial BSD
     backward compatibility.  Neither is all too clean.
+
+    If you do have "grantpt()" and "ptsname()", etc., but not
+    "/usr/lib/pt_chmod" or the bit hack for "ptsname()" doesn't work
+    for you, try compiling the "pt_chmod.c" and "ptsname.c" programs
+    I've supplied with this package in the tar file.  (Remember to give
+    "pt_chmod" setuid perms.)
 
   - Once I decide to bite the bullet, and give up support for perl4, it
     should use "use Socket" for all the socket defines like SOCK_STREAM.
@@ -311,6 +319,11 @@ History:
 10/05/95 04:12:57 PM;  eric:	added interact(), getpty_svr4(), exported funcs
 10/07/95 02:14:57 PM;  eric:	added stty_ioctl(), version 1.2, now Comm.pl
 10/09/95 04:51:10 PM;  eric:	expect() now keeps accum. data per FH, v1.3
+10/12/95 07:02:31 PM;  eric:	added support for user supplied "pt_chmod" 
+				and "ptsname" programs
+10/16/95 19:20:13 PM;  eric:	fixes for AIX2.3
+11/02/95 05:42:51 PM;  eric:	partial fixes for HP-UX9, Linux, v1.4
+11/21/95 03:21:51 PM;  eric:	*lots* of hacking for HP-UX, v1.5
 
 EOF
 
@@ -331,7 +344,7 @@ sub init{
   local( @args) = @_;
 
 
-  $Version = 1.3;
+  $Version = 1.5;
   if ( $version )
   {
     if ( $Version ne $version )
@@ -368,6 +381,15 @@ sub init{
   $Inited = 1;
 
 
+  $OS_name = `uname`; chop $OS_name;
+
+  if( $OS_name eq "SunOS" && ( ! -f "/vmunix" ) )
+  {
+    $OS_name = "Solaris";
+  }
+
+  # First, try to divide the world into two camps.  It works in somewhat,
+  # but there will be many overrides :-(
   if ( -f "/vmunix" )
   {
     $OS_type = "BSD";
@@ -376,7 +398,18 @@ sub init{
   {
     $OS_type = "SVR4";
   }
-  
+
+  if ( $OS_name eq "HP-UX" || $OS_name eq "AIX" )
+  {
+    $OS_type = "BSD";
+  }
+  elsif( $OS_name eq "Linux" )
+  {
+    require 'sys/syscall.ph';
+    $OS_type = "SVR4";
+    $WNOHANG = 1;
+  }
+
   print STDERR "OS_type=$OS_type\n" if $Debug;
 
   chop( $My_host = `uname -n ` );
@@ -394,10 +427,6 @@ sub init{
     $SOCK_STREAM=2;	# the weenies just had to reverse it!
     $SOCK_DGRAM=1;
 
-    # These must be syscalls because Perl's ioctl doesn't know about I_PUSH
-    #syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, "ptem" );
-    #syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, "ldterm");
-
     # from /usr/include/sys/termios.h
     $tIOC    	=( unpack("C", 't') << 8);
     $TIOCGETP       =($tIOC|8);
@@ -406,7 +435,7 @@ sub init{
     $TIOC     	=( unpack("C", 'T' ) <<8);
     $TCGETS         =($TIOC|13);
     $TCSETS         =($TIOC|14);
-    $TCSANOW        =(( unpack("C",'T')<<8)|14); #/* same as TCSETS */
+    $TCSANOW    =(( unpack("C",'T')<<8)|14); #/* same as TCSETS */
     $TCGETA  	=($TIOC|1);
     $TCSETA  	=($TIOC|2);
 
@@ -422,14 +451,59 @@ sub init{
     $ISPTM	= ((ord('P')<<8)|1);    #/* query for master */
     $UNLKPT	= ((ord('P')<<8)|2);    #/* unlock master/slave pair */
 
+    if( $OS_name eq "Linux" )
+    {
+      $SOCK_STREAM=1;
+      $SOCK_DGRAM=2;
+    
+      $TCGETA = 0x5405;
+      $TCSETA = 0x5406;
+    }
+
   }
   else
   {
     $SOCK_STREAM=1;
     $SOCK_DGRAM=2;
 
-    $TIOCGETP=0x40067408;	#d(1074164744)
-    $TIOCSETP=0x80067409;	#d(-2147060727)
+    if ( $OS_name eq "HP-UX" )
+    {
+      # Note: "use POSIX" has the nasty habit of causing re-open of STDIN
+      # not to use file descriptor 0, if done between closing and re-opening.
+      eval "use POSIX";		# quote for perl5.000 (otherwis,e causes 
+				# abort during compilation even if not on HP).
+      $WNOHANG = 1;
+
+      $TIOCGETP=0x40087408;
+      $TIOCSETP=0x80087409;
+      $TCGETA=0x40125401;
+      $TCSETA=0x80125402;
+
+      $TIOCSCTTY=0x20005421;
+      $TIOCTTY=0x80047468;
+      $TIOCTRAP=0x80047467;
+      $TIOCMONITOR=0x8004745f;
+      $TIOCREQSET=0x80187464;
+      $TIOCREQCHECK=0x40187471;
+      $TIOCCLOSE=0x20007462;
+
+      # not defined: $TIOCNOTTY
+    }
+    else
+    {
+      $TIOCGETP=0x40067408;	#d(1074164744)
+      $TIOCSETP=0x80067409;	#d(-2147060727)
+      $TIOCNOTTY=0x20007471;
+    }
+
+  }
+
+  local($ioctl);
+  for $ioctl ( TIOCGETP, TIOCSETP, TIOCSCTTY, TIOCTTY, TIOCTRAP, TIOCMONITOR,
+   TIOCGETP, TIOCSETP, TIOCNOTTY, TIOCGETP, TIOCSETP, TCGETS, TCSETS, TCSANOW,
+   TCGETA, TCSETA, TIOCREQSET, TIOCREQCHECK, TIOCCLOSE )
+  {
+    eval qq,\$Ioctl_names{\$$ioctl} .= "$ioctl " ,;
   }
 
   # stuff common to both OS types:
@@ -810,6 +884,10 @@ sub select_it {
     }
     if ( vec( $eout, fileno( $handle ), 1 ) == 1 ) 
     {
+      if ( $OS_name eq "HP-UX" )
+      {
+	&pty_clear_trap($handle);
+      }
       print "Exception on read_handle=$handle\n" if $DEBUG; 
     }
   }
@@ -819,76 +897,51 @@ sub select_it {
 
 
 
+
+
 sub open_proc {
+
+  #eval "use Pty_spawn";
+  #if ( ! $@ )
+  #{
+    #return &open_proc_Pty_spawn( @_ );
+  #}
 
   die "$My_pkg'init not called, aborting" unless $Inited;
 
   local(@cmd) = @_;
-  local( $wantarray ) = wantarray;
 
   #local(*TTY,*PTY);	# PTY must not die when sub returns
   local( $pty_handle, $tty_handle );
   local($pty,$tty);
 
   $pty_handle = "proc" . ++$Next_handle;
-  *PTY = $pty_handle;
+  *PTY = $pty_handle;			# glob magic needed, apparently :-(
   $tty_handle = "proc" . ++$Next_handle;
   *TTY = $tty_handle;
 
-  if ( $OS_type eq "SVR4" )
-  {
-    ($pty,$tty) = &getpty_svr4(PTY,TTY);
-  }
-  else
-  {
-    ($pty,$tty) = &getpty(PTY,TTY);
-  }
-
+  ($pty,$tty) = &getpty(PTY,TTY);
   die "Cannot find a new pty" unless defined $pty;
+
   local($pid) = fork;
   die "Cannot fork: $!" unless defined $pid;
+
+  print STDERR "open_proc: mypid=$$, \$PIDS{$pty_handle} = $pid\n" if $Debug;
+  $PIDS{$pty_handle} = $pid;
+  $PIDS{$tty_handle} = $pid;
+  $TTYS{$tty_handle} = $tty;
+  $TTYS{$pty_handle} = $tty;
+  $PTY_for_TTY{$tty_handle} = $pty_handle;
+  $TTY_for_PTY{$pty_handle} = $tty_handle;
+
   unless ($pid) 
   {
-    close STDIN; close STDOUT; close STDERR;
-    if ( $OS_type eq "SVR4" )
-    {
-      syscall(39,3); #* setsid():: syscall(39,3)
-    }
-    else
-    {
-      #syscall(175);#setsid , doesn't seem to work well
-      setpgrp(0,$$); 
-      # this ioctl is necessary for "isig" to work right,
-      # and otherwise "csh" freaks out and hangs:
-      if (open(DEVTTY, "/dev/tty")) 
-      {
-	  ioctl(DEVTTY,0x20007471,0);	# XXX s/b &TIOCNOTTY
-	  close DEVTTY;
-      }
-    }
-    open(STDIN,"<$tty");
-    #open(STDIN,"<&TTY");	# fails to assign controlling tty!
-    if ( $OS_type eq "BSD" )
-    {
-      # doesn't seem to be necessary if open by filename
-      #TIOCSCTTY,d(536900740)0x(20007484)
-      #syscall(54, fileno(STDIN), 0x20007484,  1 );
-    }
-
-    open(STDOUT,">$tty");
-    open(STDERR,">&STDOUT");
-    die "Oops" unless fileno(STDERR) == 2;	# sanity
-    close(PTY) || print "error closing master handle:$!\n";
-
-    exec @cmd;
-    die "Cannot exec @cmd: $!";
+    &do_tty_child( $tty_handle, $tty, @cmd );
   }
-
-  $PIDS{$pty_handle} = $pid;
 
   &export_FH( (caller)[0], $pty_handle,$tty_handle );
 
-  if ( $wantarray )
+  if ( wantarray )
   {
     print STDERR "open_proc returning: ($pty_handle,$tty_handle,$pid) \n" if $Debug;
     return ($pty_handle,$tty_handle,$pid);
@@ -903,56 +956,255 @@ sub open_proc {
 
 
 
-sub getpty { ## private
-  local($_PTY,$_TTY)=@_;
-  local($pty,$tty);
 
+
+<<EOF;
+sub open_proc_Pty_spawn{
+  my( $file, @args ) = @_;
+  my( $pty_handle, $tty_handle, $pid );
+
+  $pty = new Pty_spawn( $file, $file, @args );
+  print "pty=$pty\n";
+
+  $pid = $pty->pid;
+
+  $pty_handle = "proc" . ++$Next_handle;
+  $tty_handle = "proc" . ++$Next_handle;
+
+  *{$pty_handle} = *{$pty->master};
+  *{$tty_handle} = *{$pty->slave};
+  print "slave=", $pty->slave, "\n";
+
+  # what does this do??
+  #sub gensym 
+  #{
+  # my ($what) = @_;
+  # local *{"Pty_spawn::$what"};
+  # \delete $Pty_spawn::{$what};
+  #}
+
+  $PIDS{$pty_handle} = $pid;
+  $TTYS{$tty_handle} = $pty->tty;
+  $PTY_for_TTY{$tty_handle} = $pty_handle;
+
+  if ( wantarray )
+  {
+    print STDERR "open_proc returning: ($pty_handle,$tty_handle,$pid) \n" if $Debug;
+    return ($pty_handle,$tty_handle,$pid);
+  }
+  else
+  {
+    print STDERR "open_proc returning: pty_handle=$pty_handle \n" if $Debug;
+    return $pty_handle;
+  }
+
+}
+EOF
+
+
+
+
+
+sub do_tty_child{
+  local( $tty_fh, $tty_name, @cmd ) = @_;
+  local( *TTY ) = $tty_fh;
+
+  print STDERR "do_tty_child: ( $tty_fh, $tty_name, @cmd )\n" if $Debug;
+
+  # Since we have to close STDOUT/STDERR in order to get a new controlling
+  # tty, we have to find some other place to put the debug data:
+  local(*DEBUG_FH);
+  if( $Debug )
+  {
+    open(DEBUG_FH, ">Comm.pl.debug" );
+    select DEBUG_FH ; $|=1; select STDOUT;
+  }
+  close STDIN; close STDOUT; close STDERR;
+
+
+  # Try to do setsid for systems that have it:
+  if ( $OS_name eq "Solaris" )
+  {
+    &syscall_safe(39,3); #* setsid():: syscall(39,3)
+  }
+  elsif ( $OS_name eq "Linux" )
+  {
+    syscall($SYS_setsid);
+  }
+  elsif ( $OS_name eq "HP-UX" )
+  {
+    # I hope they have Perl5, cause there's no other access to setsid(),
+    # and without it, a new controlling terminal group is not set, and
+    # certain things like ^c interrupt signals don't get sent.
+    eval " POSIX::setsid()";	# quote it for perl4 compat
+    # TIOCSCTTY doesn't seem to be necessary:
+    #ioctl( STDIN, $TIOCSCTTY, 0 );
+  }
+  else
+  {
+    #???
+  }
+
+
+  # Try to do setpgrp for systems that use it:
+  if( $OS_name eq "SunOS" ) 	# Solaris has setsid, so do that instead
+  {
+    # Check to see if POSIX is/can be set, which will affect which form of
+    # setpgrp() to use.
+
+    # perl5.000 "use POSIX" has the nasty habit of opening some file descriptors
+    # which causes subsequent reopens of STDIN/OUT/ERR to open on the wrong
+    # numbers (i.e. not 0, 1, 2 )
+    if ( $] >= 5.001 )
+    {
+      # Note: "use POSIX" has the nasty habit of causing re-open of STDIN
+      # not to use file descriptor 0, if done between closing and re-opening.
+      eval "use POSIX";	# eval for perl4
+      print DEBUG_FH "do_tty_child: use POSIX returned ($@)\n" if $Debug;
+    }
+    else
+    {
+      eval "somejunktoset$@";
+    }
+
+    if ( $@ )
+    {
+      print DEBUG_FH "do_tty_child: trying to setpgrp(0,$$) \n" if $Debug;
+      setpgrp(0,$$);
+    }
+    else
+    {
+      print DEBUG_FH "do_tty_child: trying to POSIX setpgrp() \n" if $Debug;
+      eval "setpgrp()";		# perl4 thinks this is a syntax error
+      if ( $@ )
+      {
+	print DEBUG_FH "do_tty_child: POSIX setpgrp() failed\n" if $Debug;
+      }
+    }
+  }
+  elsif ( $OS_name eq "HP-UX" )
+  {
+    #print DEBUG_FH "do_tty_child: trying to setpgrp(0,0) \n" if $Debug;
+    #setpgrp(0, 0); 	# HP dies with setpgrp(0,$$);
+  }
+  # note, setpgrp kills AIX process.
+
+
+  if ( $OS_name eq "SunOS" )
+  {
+    # (TIOCNOTTY not defined on HP-UX)
+    # this ioctl is necessary for "isig" to work right,
+    # and otherwise "csh" freaks out and hangs:
+
+    if (open( DEVTTY, "/dev/tty")) 
+    {
+      &ioctl_syscall( DEVTTY, $TIOCNOTTY, undef );
+      close DEVTTY;
+    }
+    else
+    {
+    }
+  }
+
+  print DEBUG_FH "do_tty_child: reopening STDIN \n" if $Debug;
+
+  open(STDIN,"<$tty_name");
+  #open(STDIN,"<&TTY");	# fails to assign controlling tty! (Sun)
+
+
+  open(STDOUT,">&TTY");
+  #open(STDOUT,">$tty_name");	# This causes weirdo problems with AIX
+
+  open(STDERR,">&STDOUT");
+
+  # Wait until STDERR is open to send error message :-)
+  die "Should be 0:  fileno(STDIN) = " . fileno(STDIN) 
+	unless fileno(STDIN) == 0;	# sanity
+  die "Should be 1:  fileno(STDOUT) = " . fileno(STDOUT) 
+	unless fileno(STDOUT) == 1;	# sanity
+  die "Should be 2:  fileno(STDERR) = " . fileno(STDERR) 
+	unless fileno(STDERR) == 2;	# sanity
+
+  close(PTY) || print "error closing master handle:$!\n";
+
+
+  print DEBUG_FH "do_tty_child: mypid=$$, execing @cmd, STDIN=$tty_name STDOUT=$tty_name \n" if $Debug;
+
+  if ( scalar(@cmd) == 1 )
+  {
+    exec $cmd[0] || die "Cannot exec @cmd: $!";
+  }
+  elsif ( scalar(@cmd) > 1 )
+  {
+    exec @cmd || die "Cannot exec @cmd: $!";
+  }
+  else
+  {
+    # Oh no!
+  }
+}
+
+
+sub getpty { ## private
+  local( $_PTY, $_TTY ) = @_;
+  local( $pty, $tty );
+  local( @ptys );
+
+  # Force given filehandle names explicitly into caller's package:
   $_PTY =~ s/^([^']+)$/(caller)[$[]."'".$1/e;
   $_TTY =~ s/^([^']+)$/(caller)[$[]."'".$1/e;
 
-  for $bank (112..127) 
+  if ( -e "/dev/ptmx" || -e "/dev/ptc" )
   {
-    next unless -e sprintf("/dev/pty%c0", $bank);
-    for $unit (48..57) 
-    {
-      $pty = sprintf("/dev/pty%c%c", $bank, $unit);
-      open($_PTY,"+>$pty") || next;
-      select((select($_PTY), $| = 1)[0]);
-      ($tty = $pty) =~ s/pty/tty/;
-      # some stupid magic says I can't use a variable
-      # name in the open for a TTY open
-      open($_TTY,"+>$tty") || next;
-      select((select($_TTY), $| = 1)[0]);
-      if ( $OS_type eq "SVR4" )
-      {
-	local( $pop ) = pack( "p", $pop );
-	syscall($SYS_ioctl, fileno($_TTY), $I_POP, 0 );
-	syscall($SYS_ioctl, fileno($_TTY), $I_POP, 0 );
-	#syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
-	#print "looked: len=", length($pop),"($pop)\n";
-	#$pop = pack( "p", $pop );
-	#syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
-	#print "looked: len=", length($pop),"($pop)\n";
+    return &getpty_svr4($_PTY,$_TTY);
+  }
 
-	local($tmp);
-	# $tmp needed because Solaris2.4,2.5 complains:
-	# Modification of a read-only value attempted at 
-	# Comm.pl line  ...
-	# if you use a string literal instead
-	syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, $tmp="ptem" );
-	syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, $tmp="ldterm");
-	system "stty nl < $tty";
-      }
-      else
-      {
-	system "stty nl > $tty ";
-      }
-      print STDERR "getpty: returning ($pty,$tty)\n" if $Debug;
-      return ($pty,$tty);
+  @ptys = `ls /dev/pty* 2>/dev/null`; chop @ptys;
+  if ( @ptys && ! -d "/dev/ptym" )
+  {
+    $Have_pty = 1;
+  }
+  else
+  {
+    @ptys = `ls /dev/ptym/* 2>/dev/null`; chop @ptys;
+    if ( @ptys )
+    {
+      # HP-UX uses ptym:
+      $Have_ptym = 1;
     }
+    else
+    {
+      die "Don't know how to allocate a pseudo-tty on your system";
+    }
+  }
+
+  for $pty ( @ptys )
+  {
+    open($_PTY,"+>$pty") || next;
+    select((select($_PTY), $| = 1)[0]);
+
+    if ( $Have_pty )
+    {
+      ($tty = $pty) =~ s/pty/tty/;
+    }
+    elsif ( $Have_ptym )
+    {
+      ($tty = $pty) =~ s:/dev/ptym/pty:/dev/pty/tty:;
+    }
+    print STDERR "getpty: trying pty=$pty, tty=$tty\n" if $Debug;
+
+    open($_TTY,"+>$tty") || next;
+    select((select($_TTY), $| = 1)[0]);
+
+    system "stty nl > $tty < $tty";	# might cause AIX timing problems??
+    print STDERR "getpty: returning ($pty,$tty)\n" if $Debug;
+    return ($pty,$tty);
   }
   return undef;
 }
+
+
+
 
 
 
@@ -963,43 +1215,65 @@ sub getpty { ## private
 
 sub getpty_svr4{
   local( $MASTER, $SLAVE ) = @_;
-  local( $master, $slave, $rdev, @attrib );
+  local( $master, $master_fd, $slave, $rdev, @attrib );
+  local( $i );
 
   $master = "/dev/ptmx";
+  $master = "/dev/ptc" if ( -e "/dev/ptc" );
 
-  open($MASTER, "+>$master") || die "Could not open /dev/ptmx, $!";
+  # Try a few times, in case we're competing with another process
+  for ( $i = 0 ; ; $i++ )
+  {
+    if ( open($MASTER, "+>$master") )
+    {
+      last;
+    }
+    elsif ( $i >= 5 )
+    {
+      warn "Could not open $master, $!, after $i attempts";
+      return undef;
+    }
+    sleep 1;
+  }
+
   select((select($MASTER), $| = 1)[0]);
+  $master_fd = fileno( $MASTER );
+
+  # Perl sets close-on-exec. stupid.[Casper]
+  fcntl($MASTER, 2, 0);
 
   #@attrib = stat($MASTER);
   @attrib = eval " stat($MASTER ) "; # otherwise, it thinks $MASTER is filename
 
   $rdev = $attrib[6];
+  print STDERR "getpty_svr4: stat($MASTER)=(",join(",",@attrib),"), 6=$rdev\n"
+	if $Debug;
 
-  # ptsname - not portable probably: assumes 14 bit minor numbers.
-  # only a problem if it's less than 14bits, I think.
-  print STDERR "rdev=$rdev\n" if $Debug;
-  $rdev &= (1<<14) - 1;
-  $slave = "/dev/pts/$rdev";
-  print STDERR "slave=$slave\n" if $Debug;
-
-  # I'm forking a child to do this, so that unsetting close-on-exec won't
-  # have unforeseen consequences later on.
-  # It might not even be necessary, since it seems to work for me without
-  # the fcntl(), though I guess it didn't for Casper.
-  unless (fork )
+  # The user might have an executable "ptsname" program:
+  eval "$slave = `ptsname $master_fd 2>/dev/null`";	# trap error messages
+  chop $slave;
+  if ( !$slave )
   {
-    # Perl sets close-on-exec. stupid.
-    fcntl($MASTER, 2, 0);
-
-    # grantpt() function emulation, apparently it calls pt_chmod:
-    local($cmd) = "/usr/lib/pt_chmod " . fileno($MASTER) ;
-    print STDERR "system ($cmd)\n" if $Debug;
-    system $cmd || die "pt_chmod failed";
-    exit;
+    print STDERR "ptsname not found, using Solaris minor numbers\n" if $Debug;
+    # Solaris:
+    # ptsname - not portable probably: assumes 14 bit minor numbers.
+    # only a problem if it's less than 14bits, I think.  [Casper]
+    print STDERR "rdev=$rdev\n" if $Debug;
+    $rdev &= (1<<14) - 1;
+    $slave = "/dev/pts/$rdev";
   }
-  wait;
 
-  # unlockpt  (send STREAMs message UNLKPT)
+  print STDERR "slave=$slave, ptsname($master_fd)=$slave\n" if $Debug;
+
+  # Try to find "pt_chmod".  It *might* be in "/usr/lib".
+  $ENV{PATH} .= ":/usr/lib" unless $ENV{PATH} =~ m!/usr/lib[^/]*!;
+
+  # grantpt() function emulation, apparently it calls pt_chmod:
+  local($cmd) = "pt_chmod $master_fd";
+  print STDERR "system ($cmd)\n" if $Debug;
+  system $cmd || die "pt_chmod failed";
+
+  # unlockpt  (send STREAMs message UNLKPT) [Casper]
   $p = pack("i3p", $UNLKPT, 0, 0, $ret);
 
   ioctl($MASTER, $I_STR, $p );
@@ -1007,17 +1281,36 @@ sub getpty_svr4{
   # open slave
   open($SLAVE,"+>$slave") || die "could not open slave, errno=$!";
 
-  # push streams modules ptem and ldterm,
-  # but first remove any modules that might have been hanging around.
-  local( $pop ) = pack( "p", $pop );
-  ioctl( $SLAVE, $I_POP, 0 );
-  ioctl( $SLAVE, $I_POP, $pop );
-  #print "looked: len=", length($pop),"($pop)\n";
+  if ( $OS_name eq "Solaris" )
+  {
+    # push streams modules ptem and ldterm,
+    # but first remove any modules that might have been hanging around.
+    local( $pop ) = pack( "p", $pop );
+    ioctl( $SLAVE, $I_POP, 0 );
+    ioctl( $SLAVE, $I_POP, 0 );
+    ioctl( $SLAVE, $I_POP, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
 
-  ioctl($SLAVE, $I_PUSH, $tmp = "ptem") || die "ioctl ptem failed";
-  ioctl($SLAVE, $I_PUSH, $tmp = "ldterm") || die "ioctl ldterm failed";
+    #syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
+    #$pop = pack( "p", $pop );
+    #syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
 
-  system "stty nl < $slave";	# not sure this does anything useful
+    # $tmp needed because Solaris2.4,2.5 complains:
+    # Modification of a read-only value attempted at ...
+    # if you use a string literal instead, E.g.:
+    ###syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, "ptem" );
+
+    local($module) = "ptem";
+    ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
+    $module = "ldterm";
+    ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
+    $module = "ttcompat";
+    ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
+  }
+
+  #system "stty nl < $slave > $slave";	# not sure this does anything useful
 
   print STDERR "getpty_svr4 returning ($master,$slave)\n" if $Debug;
   return ($master,$slave);
@@ -1055,12 +1348,13 @@ sub getpty_svr4{
 # ^ and $ should work, respecting the current value of $*.
 
 
+%Accum = ();	# shut up -w
 
 sub expect {
   local( $fh, $endtime, @patterns ) = @_;
 
   local( $pattern, $accum, $match, $before, $after, $err );
-  local( $rmask, $nfound, $nread, $buf);
+  local( $rmask, $nfound, $nread, $buf );
   local( $pkg ) = caller;
 
   $endtime += time if $endtime < 600_000_000;
@@ -1107,6 +1401,7 @@ sub expect {
       } 
       else 
       {
+	print STDERR "expect: sysread returned null, returning EOF\n" if $Debug;
 	$before = $Accum{$fh};
 	$Accum{$fh} = "";
 	$err = "EOF";
@@ -1130,12 +1425,14 @@ sub expect {
     # and we wouldn't want to return EOF yet.
     if ( $PIDS{$fh} )
     {
+      print STDERR "expect: checking pid $PIDS{$fh} \n" if $Debug;
       &wait_nohang;
       if ( !kill( 0, $PIDS{$fh} ) )
       {
 	$before = $Accum{$fh};
 	$Accum{$fh} = "";
 	$err = "EOF";
+	print STDERR "expect: pid $PIDS{$fh} gone, returning EOF\n" if $Debug;
       }
     }
   }
@@ -1164,6 +1461,105 @@ sub expect {
   }
 
 }
+
+
+
+
+# I only seem to receive traps when I set TIOCTRAP to 0, oddly.
+
+sub pty_select_clear_trap {
+  local( $handle ) = @_;
+
+  return if $handle eq "STDIN";
+
+  if ( $PTY_for_TTY{$handle} )
+  {
+    $handle = $PTY_for_TTY{$handle};
+  }
+
+  # Init these to make -w happy:
+  local( @ready ) = ();
+  local( $rout, $rmask, $eout, $emask ) = ( '', '', '', '', '' );
+  local( $request, $junk, $ioctl_info );
+
+  LOOP:{
+    vec( $emask, fileno( $handle ), 1 ) = 1;
+    ( $nfound, $timeleft ) = select( undef, undef, $eout=$emask, 0 );
+    print STDERR "pty_select_clear_trap: after select fh=$handle, nfound=$nfound\n" if $Debug;
+
+    if ( vec( $eout, fileno( $handle ), 1 ) == 1 ) 
+    {
+      print STDERR "pty_select_clear_trap: exception on fh=$handle\n" if $Debug;
+    }
+
+    if ( $nfound < 1 )
+    {
+      if ( $nfound < 0 )
+      {
+	print STDERR "pty_select_clear_trap: error=$!\n" if $Debug; 
+      }
+      return ;
+    }
+    &pty_clear_trap($handle);
+
+    redo LOOP;
+  }
+
+}
+
+
+sub pty_clear_trap{
+  local($handle) = @_;
+
+  return if $handle eq "STDIN";
+
+  if ( $PTY_for_TTY{$handle} )
+  {
+    $handle = $PTY_for_TTY{$handle};
+  }
+
+  print STDERR "pty_clear_trap: before ioctl TIOCREQCHECK \n" if $Debug;
+  ioctl( $handle, $TIOCREQCHECK, $ioctl_info) || die "$!";
+
+
+  local($request_info_t) = "IIISSII";
+
+  ( $request, $argget, $argset, $pgrp, $pid, $errno_error, $return_value ) =
+       unpack( $request_info_t, $ioctl_info );
+
+  print STDERR "pty_clear_trap: request=$request (TIOCCLOSE=$TIOCCLOSE) \n" if $Debug;
+
+  if ( $request == $TIOCCLOSE )
+  {
+  }
+  else
+  {
+    $errno_error = $return_value = 0;
+    $ioctl_info  = pack( $request_info_t, 
+      $request, $argget, $argset, $pgrp, $pid, $errno_error, $return_value
+       );
+    ioctl( $handle, $TIOCREQSET, $ioctl_info)|| die "$!";
+    #/* presumably, we trapped an open here */
+  }
+}
+
+
+# From /usr/include/sys/ptyio.h on HP-UX:
+#struct request_info {
+#	int request;		/* ioctl command received (read only) */
+#	int argget;		/* request to get argument trapped on
+#				   on slave side (read only) */
+#	int argset;		/* request to set argument to be returned
+#				   to slave side (read only) */
+#	short pgrp;		/* process group number of slave side process
+#				   doing the operation (read only) */
+#	short pid;		/* process id of slave side process 
+#				   doing the operation (read only) */
+#	int errno_error;	/* errno(2) error returned to be
+#				   returned to slave side (read/write) */
+#	int return_value;	/* return value for slave side (read/write) */
+#};
+
 
 
 # The pattern matched in STDIN isnt' sent to the proc.,
@@ -1203,6 +1599,12 @@ sub interact {
   #&system_proc( $handle, "stty sane" );	# not my job!
   $| = 1; 					# STDOUT better be selected,							# or nothin's gunna work anyway
 
+  if ( $Accum{$handle} ne "" )
+  {
+    print $Accum{$handle} ;
+    $Accum{$handle}  = "";
+  }
+
   LOOP: 
   {
     @ready_handles = &select_it(1, STDIN,$handle);
@@ -1213,6 +1615,10 @@ sub interact {
       {
 	last unless sysread( $handle, $buf, 100000 );
 	print $buf;
+
+	#($buf,$ret) = Pty_spawn::Pty_read(fileno($handle));
+	#last if $ret;
+	#print "($buf)";
 
 	$regex_accum .= $buf;
 
@@ -1269,8 +1675,14 @@ sub interact {
     &wait_nohang;
     if ( !kill( 0, $PIDS{$handle} ) )
     {
+      print STDERR "expect: pid $PIDS{$handle} gone, returning EOF\n" if $Debug;
+      #system "ps -lp $PIDS{$handle}" if $Debug;
       $err = "EOF";
       last LOOP;
+    }
+    else
+    {
+      #print STDERR "interact: handle=$handle, pid=$PIDS{$handle} still alive\n" if $Debug;
     }
 
     redo LOOP;
@@ -1307,22 +1719,42 @@ sub open_dupprochandle {
 
 # "Bring out your deeeeeeead"
 sub wait_nohang{
-  if ( $OS_type eq "SVR4" ) 
+
+  #if ( $OS_type eq "SVR4" ) 
+  if ( $OS_name eq "Solaris" )
   {
-    # syscall 7 == wait/wait4 for BSD
     # syscall 107 == waitsys for Solaris, which seems to be waitid?
     # int waitid(idtype_t idtype, id_t id, siginfo_t *infop, int options);
     #define WNOHANG         0100/* non blocking form of wait    */
     #define WEXITED         0001/* wait for processes that have exited  */
     # See: <sys/procset.h> and <sys/wait.h>
     # Arguments: 7=P_ALL=idtype_t, 64=\100=WNOHANG | 1=W
-    syscall(107,7,0,0,64|1);
+    &syscall_safe(107,7,0,0,64|1);
   }
-  else
+  elsif ( $OS_name eq "SunOS" )
   {
     # Maybe unnecessary, since the SunOS4.x version of Perl does an implicit
     # wait4, apparently.	7==SYS_wait4, 1==WNOHANG
-    syscall(7,0,0,1,0);
+    &syscall_safe(7,0,0,1,0);
+  }
+  elsif ( $OS_name eq "Linux" )
+  {
+    $pg = getpgrp;
+    waitpid(-$pg, $WNOHANG);
+  }
+  elsif ( $OS_name eq "HP-UX" )
+  {
+    # 84 is syscall wait3 for HP-UX
+    # 200 is syscall waitpid for HP-UX
+    #&syscall_safe(200,0,1,0) ;
+    # I don't know why the native Perl waitpid() doesn't work with pgrp
+    waitpid(-1, $WNOHANG );
+  }
+  else	
+  {
+    # make "waitpid" the default?
+    # maybe just better not to do anything, since guesses will probably
+    # cause a blocking/hanging "wait".
   }
 }
 
@@ -1373,10 +1805,42 @@ sub print{
     print STDERR "Error printing to fh($fh),$!\n"; }
   return $ret;
 }
-#sub ioctl{
-#  local($fh)=shift;
-#  syscall( 54, fileno($fh), @_ ) == 0;
-#}
+
+# Don't use syscall for AIX, it kills the process
+
+sub syscall_safe{
+  return 1 if $OS_name eq "AIX";
+  #print "syscall( $_[0], $_[1], $_[2], $_[3], $_[4] ) \n" if $Debug;
+  syscall( $_[0], $_[1], $_[2], $_[3], $_[4] ) ;
+}
+
+
+# *val must be a glob, because some ioctl() functions return a structure
+# into the given variable.
+
+sub ioctl_syscall{
+  local($fh,$func,*val)=@_;
+  local( $pty );
+
+  # First try using the native "ioctl()" call.  Then if that doesn't work
+  # (and it doesn't in some situations, i.e. IRIX5.3), use a "syscall()"
+  # equivalent:
+
+  print STDERR "ioctl_syscall($fh, $Ioctl_names{$func}, $val) \n" if $Debug;
+
+  if ( !ioctl($fh, $func, $val ) )
+  {
+    print STDERR "ioctl_syscall: ioctl failed,resorting to syscall\n" if $Debug;
+    if ( &syscall_safe( $SYS_ioctl, fileno($fh), $func, $val ) != 0 )
+    {
+      warn "ioctl failed, args=(@_), errno=$!";
+    }
+  }
+
+  print STDERR "ioctl_syscall returning \n" if $Debug;
+  return 1;
+}
+
 #sub sysread{
 #  local(*FH)=shift;
 #  sysread(FH, $_[0], $_[1]);
@@ -1423,7 +1887,7 @@ sub close_it{
       {
 	last unless kill( 0, $PIDS{$fh} );
 	print STDERR "Waiting for $PIDS{$fh} to die\n" if $Debug;
-	sleep 1;
+	select( undef, undef, undef, .1); # sleep
       }
       kill( 9, $PIDS{$fh} );	# drill it!
     }
@@ -1447,14 +1911,21 @@ sub system_proc{
   {
     unless ( fork() )
     {
+      &do_tty_child( $handle, $TTYS{$handle}, @args );
+      if(0)
+      {
+      local($tty);
       close(STDIN);close(STDOUT);
+      # AIX can't seem to handle this idea:
       open(STDIN,"<&$handle" );
       open(STDOUT,">&$handle" );
-      system "echo 'system_proc: execing @args <$handle >$handle ' </dev/tty >/dev/tty" if $Debug;
       exec ( @args );
+      }
       exit;
     }
+    print STDERR "system_proc: waiting\n" if $Debug;
     wait;
+    print STDERR "system_proc: done waiting\n" if $Debug;
   }
 }
 
@@ -1467,7 +1938,18 @@ sub system_proc{
 
 sub stty_sane{
   local( $handle ) = @_;
-  local( $packed ) = ();
+  local( $tmp ) = ();
+
+  if ( $OS_name eq "HP-UX" )
+  {
+    $handle = $PTY_for_TTY{$handle} if  $PTY_for_TTY{$handle};
+  }
+
+  if ( $OS_name eq "AIX" )	# AIX stty hangs in weird places
+  {
+    $tmp = pack("C*", 13,13,8,21,0,216 );
+    return &ioctl_syscall( $handle, $TIOCSETP, *tmp ); 
+  }
 
   &stty_ioctl( $handle, "stty sane" );
   print STDERR "Done, stty_sane\n" if $Debug;
@@ -1476,6 +1958,18 @@ sub stty_sane{
 
 sub stty_raw{
   local( $handle ) = @_;
+  local( $tmp);
+
+  if ( $OS_name eq "HP-UX" )
+  {
+    $handle = $PTY_for_TTY{$handle} if  $PTY_for_TTY{$handle};
+  }
+
+  if ( $OS_name eq "AIX" )
+  {
+    $tmp = pack("C*", 13,13,8,21,0,224 );
+    return &ioctl_syscall( $handle, $TIOCSETP, *tmp ); 
+  }
 
   if ( $OS_type eq "SVR4" ) {
     &stty_ioctl( $handle, "stty raw -echo" );
@@ -1489,21 +1983,126 @@ sub stty_raw{
 
 sub stty_ioctl{
   local( $handle, $stty_cmd ) = @_;
-  local( $ret );
+  local( $tmp, $ret );
+
+  if ( $OS_name eq "HP-UX" )
+  {
+    $handle = $PTY_for_TTY{$handle} if  $PTY_for_TTY{$handle};
+  }
 
   if ( ! $Stty_struct{$stty_cmd} ){
     $Stty_struct{$stty_cmd} = &get_ioctl_from_stty( $handle, $stty_cmd ) }
 
-  if ( $OS_type eq "SVR4" ) {
-    $ret = ioctl( $handle, $TCSETA, $Stty_struct{$stty_cmd} );
-  } else {
-    $ret = ioctl( $handle, $TIOCSETP, $Stty_struct{$stty_cmd} ); 
+  local($tmp) = $Stty_struct{$stty_cmd};
+  if ( $OS_type eq "SVR4" || $OS_name eq "HP-UX" ) 
+  {
+    $ret = &ioctl_syscall( $handle, $TCSETA, *tmp );
+  } 
+  else 
+  {
+    $ret = &ioctl_syscall( $handle, $TIOCSETP, *tmp ); 
   }
 
   warn "stty_ioctl, ioctl failed for handle($handle), command($stty_cmd), errno=$!\n" unless $ret;
 
   print STDERR "Done, stty_ioctl\n" if $Debug;
+
 }
+
+
+
+
+sub get_ioctl_from_stty{
+  local( $handle, $stty_cmd ) = @_;
+  local( $ioctl_struct, $get_cmd, $set_cmd, $out, $ret ) = ();
+  local( $pty_handle, $pid );
+
+
+  # This seems to be recommended, but I don't see it doing much:
+  if ( $OS_name eq "HP-UX" && $handle ne "STDIN" )
+  {
+    $pty_handle = $handle;
+    $pty_handle = $PTY_for_TTY{$handle} if $PTY_for_TTY{$handle};
+    ioctl($pty_handle, $TIOCTRAP, 0 ) || die "$!";
+
+    #ioctl( $pty_handle, $TIOCTTY, 0 );	# causes hang of open_proc child 
+					# shell regardless of value???
+  }
+
+  local( $tty ) = $TTYS{$handle};
+  $tty = "/dev/tty" unless $tty;
+  print STDERR "get_ioctl_from_stty($handle): $stty_cmd <$tty >$tty\n" if $Debug;
+
+  if ( $OS_name eq "HP-UX" && $handle ne "STDIN" )
+  {
+    # if I set TIOCTRAP to 0, I will subsequently receive traps once 
+    # interact() starts, and for every "stty sane" command run in it,
+    # which is backwards, as far as I understand the doc.s (which is poorly).
+    # Since it seems to work either way, I'm leaving it alone.
+    #&ioctl_syscall($handle, $TIOCTRAP, 0 );
+    print STDERR "get_ioctl_from_stty: forking \n" if $Debug;
+    local($pid);
+    if ( $pid = fork )
+    {
+      {
+	# For some reason, if we don't clear the data from the PTY,
+	# anything else will hang until we do.  Also, if we then try
+	# reading again.
+	# I'm hoping that "expect()" will clear the pending data, and
+	# do any PTY trapping necessary.
+
+	print STDERR "get_ioctl_from_stty: waiting for pid=$pid \n" if $Debug;
+	local( @r ) = &expect( $handle, 1, '' );
+	print STDERR "get_ioctl_from_stty: cleared (",join(",",@r), ") from $handle \n" if $Debug;
+	if ( kill( 0, $pid) )
+	{
+	  # be sure that the child has set the new TTY modes, and exited
+	  # before we proceed to read those modes.
+	  select( undef, undef, undef, .1); # sleep
+	  redo;
+	}
+      }
+      print STDERR "get_ioctl_from_stty: done waiting\n" if $Debug;
+    }
+    else
+    {
+      print STDERR "get_ioctl_from_stty: before stty\n" if $Debug;
+      system "$stty_cmd <$tty >$tty";
+      print STDERR "get_ioctl_from_stty: stty done\n" if $Debug;
+      exit 0;
+    }
+  }
+  else
+  {
+    system "$stty_cmd <$tty >$tty";
+  }
+
+  # These only return 4 bytes.  Why?
+  # $p = pack("p", $ioctl_struct );
+  #$ret = syscall($SYS_ioctl, fileno($handle), $TIOCGETP, $p);
+  #$ret = syscall($SYS_ioctl, fileno($handle), $TCGETA, $p);
+
+  if ( $OS_type eq "SVR4" || $OS_name eq "HP-UX" )
+  {
+    $get_cmd = $TCGETA;
+  }
+  else
+  {
+    # If you use TIOCGETP/SETP on HP, it will cause a hang on a PTY/TTY !!!
+    # It is defined, but not longer fully supported, I guess.
+    $get_cmd = $TIOCGETP;
+  }
+
+  $!=0;
+  $ioctl_struct = "\0"x256;	# for perl4
+  $ret = &ioctl_syscall($handle, $get_cmd, *ioctl_struct );
+
+  warn "get_ioctl_from_stty: ioctl failed, errno=$!" unless $ret;
+
+  return $ioctl_struct;
+  #return ( $ioctl_struct, $ret );	# blows up $ioctl_struct on the stack
+}
+
 
 
 
@@ -1531,34 +2130,6 @@ sub stty_ioctl{
 #     $ioctl_struct = pack("C*", 37,38,0,5,5,173,138,59,0,3,28,127,21,4 );
 #     ioctl( $handle, $TCSETA, $ioctl_struct );
 # 
-
-
-sub get_ioctl_from_stty{
-  local( $handle, $stty_cmd ) = @_;
-  local( $ioctl_struct, $get_cmd, $set_cmd, $out, $ret ) = ();
-
-  &system_proc( $handle, $stty_cmd );
-
-  # These only return 4 bytes.  Why?
-  # $p = pack("p", $ioctl_struct );
-  #$ret = syscall($SYS_ioctl, fileno($handle), $TIOCGETP, $p);
-  #$ret = syscall($SYS_ioctl, fileno($handle), $TCGETA, $p);
-
-  if ( $OS_type eq "SVR4" ){
-    $get_cmd = $TCGETA;
-  }else{
-    $get_cmd = $TIOCGETP;
-  }
-
-  $!=0;
-  $ioctl_struct = "\0"x256;	# for perl4
-  $ret = ioctl($handle, $get_cmd, $ioctl_struct );
-
-  warn "get_ioctl_from_stty: ioctl failed, errno=$!" unless $ret;
-
-  return $ioctl_struct;
-  #return ( $ioctl_struct, $ret );	# blows up $ioctl_struct on the stack
-}
 
 
 sub dump_ioctl{
@@ -1845,7 +2416,7 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.3 );
+&Comm'init( 1.5 );
 
 $Host = "somehost";
 $User = "someuser";
@@ -1894,7 +2465,7 @@ if 0;
 
 require "Comm.pl";
 
-&Comm'init( 1.3 );
+&Comm'init( 1.5 );
 
 $Program = "telnet";
 #$Program = "/usr/ucb/rlogin -l qwerty";   # try this to test login recovery
@@ -1981,7 +2552,7 @@ print $Proc_pty_handle "\n";		# give us another shell prompt, please
 LOOP: {
   ( $match, $err ) = &interact(
 	"\003", "\0331",  # don't use '\003' or string match will see "\ 0 0 3"
-	  $Proc_pty_handle, ".*1995",
+	  $Proc_pty_handle, ".*199\d",
 	);
 
   if ( $err )
@@ -2002,7 +2573,7 @@ LOOP: {
     print $Proc_pty_handle "pwd\n";
   }
 
-  if ( $match =~ /1995/ )
+  if ( $match =~ /199\d/ )
   {
     # Suck the time info from the output from "date"
     $match =~ /\d+:\d+:\d+/;
@@ -2042,3 +2613,34 @@ sub print_clean{
   print "$s\n";
 }
 
+
+
+
+#--------------------------- Example /bin/sh expect -----------------------------
+# This is a useful test in addition to the telnet test because having the 
+# "telnet" process between you and the remote shell can mask terminal modes
+# problems.
+
+eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
+& eval 'exec perl -S $0 $argv:q'
+if 0;
+
+require "Comm.pl";
+&Comm'init( 1.5 );
+#$Debug=1;
+$|=1;
+
+( $Proc_pty_handle, $Proc_tty_handle, $pid ) = &open_proc( "/bin/sh" );
+die "open_proc failed" unless $Proc_pty_handle;
+
+&stty_sane($Proc_tty_handle);	# use $Proc_pty_handle for HP
+&stty_raw(STDIN);
+print   "You are now connected to the shell process, ^C to break out\n";
+LOOP: {
+  ( $match, $err ) = &interact( "\003", $Proc_pty_handle );
+  if ( $err ) { print "Aborting, err($err)\n"; last; }
+  if ( $match eq "\003" ) { print "Got control-C\n"; last; }
+  redo LOOP;
+}
+&stty_sane(STDIN);
+print "Disconnected\n";
