@@ -38,10 +38,10 @@ Function summary:
 				# internal symbols, and exports functions to
 				# caller's package.
 
-    &Comm'init(1.5);		# If first arg is numeric, it specifies a 
+    &Comm'init(1.7);		# If first arg is numeric, it specifies a 
 				# desired version for compatibility.
 
-    &Comm'init(1.5, "func",...);# Tell it to export specified function(s),
+    &Comm'init(1.7, "func",...);# Tell it to export specified function(s),
 				# otherwise, init() will export all documented
 				# functions.
 
@@ -91,7 +91,15 @@ Function summary:
   -----------
 
     # Does a portable wait4/waitpid.  Used mostly internally.  Not exported.
-    &Comm'wait_nohang;
+    &Comm'wait_nohang( $pid );
+    # If pid is -1 or undef, wait for any.
+
+  wait_hang :
+  -----------
+
+    # Does a portable blocking waitpid.  Used mostly internally.  Not exported.
+    &Comm'wait_hang( $pid );
+    # If pid is -1 or undef, wait for any.
 
   expect :
   ------
@@ -324,7 +332,14 @@ History:
 10/16/95 19:20:13 PM;  eric:	fixes for AIX2.3
 11/02/95 05:42:51 PM;  eric:	partial fixes for HP-UX9, Linux, v1.4
 11/21/95 03:21:51 PM;  eric:	*lots* of hacking for HP-UX, v1.5
-
+06/18/96 02:58:20 PM;  eric:	merged changes for SCO Unix
+10/10/96 11:34:22 AM;  eric:	force STDIN to reopen to fd 0 for 
+				SunOS/Perl5.003
+11/~1/96 ..:..:.. PM;  eric:	stty_ioctl trys to use TTY handle if PTY given
+11/06/96 04:03:24 PM;  eric:	merged more fixed for SCO 3.2.4 
+11/26/96 11:26:55 AM;  eric:	added name export to open_duphandl*
+07/02/97 11:54:46 AM;  eric:	revamped "wait"ing
+08/06/97 10:23:01 AM;  eric:	rev'd to 1.7
 EOF
 
 
@@ -337,14 +352,15 @@ package Comm;
 
 sub init{
   local( $version );
-  if ( $_[0] =~ /^[\d.-]+$/ )
+
+  if ( defined($_[0]) &&  ($_[0] =~ /^[\d.-]+$/) )
   {
     $version = shift;
   }
   local( @args) = @_;
 
 
-  $Version = 1.5;
+  $Version = 1.7;
   if ( $version )
   {
     if ( $Version ne $version )
@@ -383,9 +399,17 @@ sub init{
 
   $OS_name = `uname`; chop $OS_name;
 
-  if( $OS_name eq "SunOS" && ( ! -f "/vmunix" ) )
+  if( $OS_name eq "SunOS" )
   {
-    $OS_name = "Solaris";
+    if( ! -f "/vmunix" )
+    {
+      $OS_name = "Solaris";
+      $WNOHANG = 64;
+    }
+    else
+    {
+      $WNOHANG = 1;
+    }
   }
 
   # First, try to divide the world into two camps.  It works in somewhat,
@@ -409,8 +433,17 @@ sub init{
     $OS_type = "SVR4";
     $WNOHANG = 1;
   }
+  elsif ( -d "/tcb")
+  {
+    # sco seems to have a pretty worthless implementation of uname.
+    # the existence of /tcb seems to be sco specific and this
+    # test is used by other pieces of software like "Crisp".
+    $OS_name = "SCO";
+    print STDERR "OSname is SCO\n" if $Debug;
+  }
 
-  print STDERR "OS_type=$OS_type\n" if $Debug;
+
+  print STDERR "OS_type=$OS_type\nOS_name=$OS_name\n" if $Debug;
 
   chop( $My_host = `uname -n ` );
 
@@ -1014,6 +1047,7 @@ sub do_tty_child{
   # Since we have to close STDOUT/STDERR in order to get a new controlling
   # tty, we have to find some other place to put the debug data:
   local(*DEBUG_FH);
+  $Debug=1;
   if( $Debug )
   {
     open(DEBUG_FH, ">Comm.pl.debug" );
@@ -1110,6 +1144,20 @@ sub do_tty_child{
 
   open(STDIN,"<$tty_name");
   #open(STDIN,"<&TTY");	# fails to assign controlling tty! (Sun)
+
+  # Something broke with SunOS and Perl5.003; the first file descriptor
+  # re-assigned is no longer 0, therefore we must force it:
+  local($fileno);
+  if ( ($fileno = fileno(STDIN) ) != 0 )
+  {
+    eval "dup2($fileno, 0 )";
+    if ( $@ )
+    {
+      print DEBUG_FH "do_tty_child: POSIX dup2($fileno, 0) failed\n" if $Debug;
+    }
+    close STDIN;
+    open(STDIN, "<&=0" );
+  }
 
 
   open(STDOUT,">&TTY");
@@ -1216,7 +1264,7 @@ sub getpty { ## private
 sub getpty_svr4{
   local( $MASTER, $SLAVE ) = @_;
   local( $master, $master_fd, $slave, $rdev, @attrib );
-  local( $i );
+  local( $i, $j );
 
   $master = "/dev/ptmx";
   $master = "/dev/ptc" if ( -e "/dev/ptc" );
@@ -1279,7 +1327,18 @@ sub getpty_svr4{
   ioctl($MASTER, $I_STR, $p );
 
   # open slave
-  open($SLAVE,"+>$slave") || die "could not open slave, errno=$!";
+  if (! -e $slave)
+  {
+    # if the slave pty filename is not of the form /dev/pts/XXX
+    # then we might be running under SCO_SV which names the slave
+    # ptys /dev/ptsNNN
+    # eight bits seems to be appropriate for SCO 3.2.4 because they
+    # go up to /dev/pts255
+    $rdev &= (1<<9) - 1;
+    $slave = sprintf("/dev/pts%03d",$rdev);
+    
+  }
+  open($SLAVE,"+>$slave") || die "could not open slave, $slave, errno=$!";
 
   if ( $OS_name eq "Solaris" )
   {
@@ -1309,8 +1368,37 @@ sub getpty_svr4{
     $module = "ttcompat";
     ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
   }
+  elsif ($OS_name eq "SCO")
+  {
+    # push streams modules ptem and ldterm,
+    # but first remove any modules that might have been hanging around.
+    local( $pop ) = pack( "p", $pop );
+    ioctl( $SLAVE, $I_POP, 0 );
+    ioctl( $SLAVE, $I_POP, 0 );
+    ioctl( $SLAVE, $I_POP, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
+ 
+    #syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
+    #$pop = pack( "p", $pop );
+    #syscall($SYS_ioctl, fileno($_TTY), $I_LOOK, $pop );
+    #print "looked: len=", length($pop),"($pop)\n";
+ 
+    # $tmp needed because Solaris2.4,2.5 complains:
+    # Modification of a read-only value attempted at ...
+    # if you use a string literal instead, E.g.:
+    ###syscall($SYS_ioctl, fileno($_TTY), $I_PUSH, "ptem" );
+ 
+    local($module) = "ptem";
+    # use "ioctl_syscall()" instead of raw "ioctl()", so Perl4 can be happy:
+    &ioctl_syscall( $SLAVE, $I_PUSH, *module );
+    #ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
+    $module = "ldterm";
+    &ioctl_syscall( $SLAVE, $I_PUSH, *module );
+    #ioctl($SLAVE, $I_PUSH, $module ) || die "ioctl $module failed, errno=$!";
+  }
 
-  #system "stty nl < $slave > $slave";	# not sure this does anything useful
+  system "stty nl < $slave > $slave";	# people generally expect nl to work
 
   print STDERR "getpty_svr4 returning ($master,$slave)\n" if $Debug;
   return ($master,$slave);
@@ -1357,13 +1445,16 @@ sub expect {
   local( $rmask, $nfound, $nread, $buf );
   local( $pkg ) = caller;
 
+  return undef unless defined $fh;
+  $err = "";    # to get rid of uninitialized values warnings
+
   $endtime += time if $endtime < 600_000_000;
   #print STDERR "expect: fh=$fh, time=",time,", endtime=$endtime\n" if $Debug;
 
   # try to speed things up when the child dies
   if ( $PIDS{$fh} )
   {
-    &wait_nohang;
+    1 while ( &wait_nohang() );
     if ( !kill( 0, $PIDS{$fh} ) )
     {
       $endtime = 0;
@@ -1426,7 +1517,7 @@ sub expect {
     if ( $PIDS{$fh} )
     {
       print STDERR "expect: checking pid $PIDS{$fh} \n" if $Debug;
-      &wait_nohang;
+      1 while ( &wait_nohang() );
       if ( !kill( 0, $PIDS{$fh} ) )
       {
 	$before = $Accum{$fh};
@@ -1570,7 +1661,7 @@ sub pty_clear_trap{
 
 sub interact {
   local( @args ) = @_;
-  local( $caller ) = caller;
+  local( $pkg ) = caller;
   local( $pattern, @stdin_patterns, @handle_patterns );
   local( $regex_accum, $string_accum );
   local( $match, $err );
@@ -1672,7 +1763,7 @@ sub interact {
     }
 
     # try to speed things up when the child dies
-    &wait_nohang;
+    1 while ( &wait_nohang );
     if ( !kill( 0, $PIDS{$handle} ) )
     {
       print STDERR "expect: pid $PIDS{$handle} gone, returning EOF\n" if $Debug;
@@ -1705,6 +1796,7 @@ sub open_dupsockethandle {
   local( $handle ) = @_;
   local( $new_handle ) = "socket" . ++$Next_handle;
   open($new_handle,"<&$handle");
+  &export_FH( (caller)[0], $new_handle );
   return $new_handle;
 }
 
@@ -1712,13 +1804,47 @@ sub open_dupprochandle {
   local( $handle ) = @_;
   local( $new_handle ) = "proc" . ++$Next_handle;
   open($new_handle,"<&$handle");
+  &export_FH( (caller)[0], $new_handle );
   return $new_handle;
 }
 
 
+sub wait_nohang{
+  local( $pid ) = @_;
+  &wait_it( $pid, "nohang" );
+}
+
+sub wait_hang{
+  local( $pid ) = @_;
+  &wait_it( $pid, "hang" );
+}
 
 # "Bring out your deeeeeeead"
-sub wait_nohang{
+# 
+# If $pid arg is -1 or undef, reap any all waiting defunct procs
+# otherwise just wait on the specific pid
+#
+sub wait_it{
+  local( $pid, $hang ) = @_;
+  local( $ret );
+
+  $!=undef;
+
+  if ( $hang eq "nohang" )
+  {
+    $hang = $WNOHANG;
+  }
+  elsif ( $hang eq "hang" )
+  {
+    $hang = 0;	# seems universal
+  }
+  else
+  {
+    die "bad arg for \$hang=$hang\n";
+  }
+
+  # hmm, can't just say if ! $pid for some reason (undef not false on solaris?)
+  $pid = -1 if ( $pid == 0 || $pid == undef );
 
   #if ( $OS_type eq "SVR4" ) 
   if ( $OS_name eq "Solaris" )
@@ -1729,18 +1855,25 @@ sub wait_nohang{
     #define WEXITED         0001/* wait for processes that have exited  */
     # See: <sys/procset.h> and <sys/wait.h>
     # Arguments: 7=P_ALL=idtype_t, 64=\100=WNOHANG | 1=W
-    &syscall_safe(107,7,0,0,64|1);
+    #&syscall_safe(107,7,0,0,64|1);
+
+    $ret = waitpid($pid, $hang );
   }
   elsif ( $OS_name eq "SunOS" )
   {
     # Maybe unnecessary, since the SunOS4.x version of Perl does an implicit
     # wait4, apparently.	7==SYS_wait4, 1==WNOHANG
-    &syscall_safe(7,0,0,1,0);
+    #&syscall_safe(7,0,0,1,0);
+
+    $ret = waitpid($pid, $hang );
   }
   elsif ( $OS_name eq "Linux" )
   {
+    # Hmm. I wonder if this is right.  I don't know why the person
+    # submitting the Linux version specified a pgrp
+
     $pg = getpgrp;
-    waitpid(-$pg, $WNOHANG);
+    $ret = waitpid(-$pg, $hang);
   }
   elsif ( $OS_name eq "HP-UX" )
   {
@@ -1748,7 +1881,8 @@ sub wait_nohang{
     # 200 is syscall waitpid for HP-UX
     #&syscall_safe(200,0,1,0) ;
     # I don't know why the native Perl waitpid() doesn't work with pgrp
-    waitpid(-1, $WNOHANG );
+
+    $ret = waitpid($pid, $hang );
   }
   else	
   {
@@ -1756,6 +1890,8 @@ sub wait_nohang{
     # maybe just better not to do anything, since guesses will probably
     # cause a blocking/hanging "wait".
   }
+ 
+  return $ret;
 }
 
 
@@ -1767,12 +1903,8 @@ sub wait_nohang{
 # also really nice not to have to provide a "Comm'whatever()" function for
 # every Perl function which uses a file handle.
 
-sub import_FH{
-  local( @fh ) = @_;
-  local( $pkg ) = caller;
-
-  &export_FH( $pkg, @fh );
-}
+# The caller gives this a filehandle opened by main or some other package,
+# and we give back a filehandle from this namespace that we can recognize.
 
 sub export_FH{
   &export_sym;
@@ -1833,7 +1965,9 @@ sub ioctl_syscall{
     print STDERR "ioctl_syscall: ioctl failed,resorting to syscall\n" if $Debug;
     if ( &syscall_safe( $SYS_ioctl, fileno($fh), $func, $val ) != 0 )
     {
-      warn "ioctl failed, args=(@_), errno=$!";
+      warn "ioctl failed, args=(@_)"; 
+      warn "syscall_safe( $SYS_ioctl, ", fileno($fh), ", $func, $val )";
+      warn " errno=$!";
     }
   }
 
@@ -1878,19 +2012,30 @@ sub close_it{
       shutdown($fh,2) ;	# must happen before close
     }
     #local( *fh ) = $fh;	# some god-aweful magic,
-    #close( $fh );		# left around in case it's ever needed again
+				# left around in case it's ever needed again
     close( $fh );
     if ( $fh =~ /^proc/ && $PIDS{$fh} )	# try not to kill the wrong thing
     {
-      kill( 15, $PIDS{$fh} );	# thump it
+      # Using -15, to kill the proc group.  Gotta hope that the 
+      # process got itself a new pgrp when it spawned.
+      kill( -15, $PIDS{$fh} );	# thump it
       for ( 1 .. 5 )
       {
+	# try to reap it, but don't hang, because we want the 
+	# option to SIGKILL it soon
+	&wait_nohang($PIDS{$fh} );
+
 	last unless kill( 0, $PIDS{$fh} );
 	print STDERR "Waiting for $PIDS{$fh} to die\n" if $Debug;
 	select( undef, undef, undef, .1); # sleep
       }
-      kill( 9, $PIDS{$fh} );	# drill it!
+
+      kill( -9, $PIDS{$fh} );	# drill it!
+      &wait_hang($PIDS{$fh} );
     }
+
+    close ( $PTY_for_TTY{$fh} ) if ( $PTY_for_TTY{$fh} );
+    close ( $TTY_for_PTY{$fh} ) if ( $TTY_for_PTY{$fh} );
   }
 }
 
@@ -1989,11 +2134,22 @@ sub stty_ioctl{
   {
     $handle = $PTY_for_TTY{$handle} if  $PTY_for_TTY{$handle};
   }
+  else
+  {
+    # they mistakenly gave us the wrong handle
+    if ( $TTY_for_PTY{$handle} )
+    {
+      $handle = $TTY_for_PTY{$handle};
+    }
+  }
 
-  if ( ! $Stty_struct{$stty_cmd} ){
-    $Stty_struct{$stty_cmd} = &get_ioctl_from_stty( $handle, $stty_cmd ) }
+  if ( ! $Stty_struct{$stty_cmd} )
+  {
+    $Stty_struct{$stty_cmd} = &get_ioctl_from_stty( $handle, $stty_cmd );
+  }
 
   local($tmp) = $Stty_struct{$stty_cmd};
+
   if ( $OS_type eq "SVR4" || $OS_name eq "HP-UX" ) 
   {
     $ret = &ioctl_syscall( $handle, $TCSETA, *tmp );
@@ -2030,7 +2186,12 @@ sub get_ioctl_from_stty{
   }
 
   local( $tty ) = $TTYS{$handle};
-  $tty = "/dev/tty" unless $tty;
+  if ( $handle eq "STDIN" || $handle eq "STDOUT" )
+  {
+    $tty = "/dev/tty";
+  }
+
+  die "Don't know what tty name handle($handle) is associated with" unless $tty;
   print STDERR "get_ioctl_from_stty($handle): $stty_cmd <$tty >$tty\n" if $Debug;
 
   if ( $OS_name eq "HP-UX" && $handle ne "STDIN" )
@@ -2416,12 +2577,13 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.5 );
+&Comm'init( 1.7 );
 
 $Host = "somehost";
 $User = "someuser";
 $Password = "somepassword";
-$PS1 = '(\$|\%|#|Z\|) $';	# shell prompt, Z| is my weird prompt
+#$PS1 = '(\$|\%|#|Z\|) $';	# shell prompt, Z| is my weird prompt
+$PS1 = '([$%#|]) $';	# shell prompt pattern
 $|=1;
 
 $proc_handle = &open_proc( "telnet $Host" ) || die "open_proc failed";
@@ -2465,7 +2627,7 @@ if 0;
 
 require "Comm.pl";
 
-&Comm'init( 1.5 );
+&Comm'init( 1.7 );
 
 $Program = "telnet";
 #$Program = "/usr/ucb/rlogin -l qwerty";   # try this to test login recovery
@@ -2626,7 +2788,7 @@ eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
 if 0;
 
 require "Comm.pl";
-&Comm'init( 1.5 );
+&Comm'init( 1.7 );
 #$Debug=1;
 $|=1;
 
@@ -2644,3 +2806,35 @@ LOOP: {
 }
 &stty_sane(STDIN);
 print "Disconnected\n";
+
+
+
+#-------------------- Example foreign file handle expect ---------------------
+#
+# This will give an idea of the usage, without becoming overwhelming.  See
+# the next example for better error checking and more interesting operations.
+
+eval '(exit $?0)' && eval 'exec perl -S $0 ${1+"$@"}'
+& eval 'exec perl -S $0 $argv:q'
+if 0;
+
+require "Comm.pl";
+&Comm'init( 1.7 );
+use IPC::Open3;
+
+$|=1;
+open3( WTR, RDR, ERR, "/bin/sh" ) || die "open3 failed";
+select(WTR);$|=1;select(STDOUT);
+
+print WTR "who\n";	# do something, anything
+{
+  # Now, show the results of the above command:
+  ( $match, $err, $before, $after ) = &expect( *RDR, 1, '.*\n' );
+  print "($match)\n";
+  if ( not defined $match )
+  {
+    print "err=$err, breaking loop\n" if $err;
+    last;
+  }
+  redo;
+}
